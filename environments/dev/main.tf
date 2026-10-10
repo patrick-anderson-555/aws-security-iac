@@ -96,8 +96,6 @@ resource "aws_s3_bucket" "data" {
   # checkov:skip=CKV2_AWS_62:Event notifications not needed; this is a static-data bucket with no event consumers
 }
 
-data "aws_caller_identity" "current" {}
-
 resource "aws_s3_bucket_public_access_block" "data" {
   bucket                  = aws_s3_bucket.data.id
   block_public_acls       = true
