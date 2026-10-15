@@ -1,4 +1,5 @@
 # --- Networking ---
+# Test PR for Layer 2 workflow verification - safe to discard
 data "aws_caller_identity" "current" {}
 
 data "aws_kms_key" "project" {
