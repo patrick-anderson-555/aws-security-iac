@@ -1,0 +1,77 @@
+# Layer 2 (apply half) of the IaC security gate.
+#
+# Runs on every push to main — which, once the branch protection ruleset
+# is in place, only happens when a reviewed PR with passing checks is
+# merged. Assumes the apply role (NOT the plan role), runs terraform
+# apply, actually modifies AWS resources.
+#
+# Hard-coded to apply against environments/dev/. Mirrors the hard-coding
+# in terraform-plan.yml; both should move to matrix-over-environments
+# together when a second environment is added.
+
+name: terraform-apply
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'environments/**'
+      - 'modules/**'
+      - '.github/workflows/terraform-apply.yml'
+
+permissions:
+  id-token: write      # required to request the OIDC token from GitHub
+  contents: read       # required to check out the merged main commit
+
+env:
+  TF_IN_AUTOMATION: 'true'
+  TF_INPUT: '0'
+  WORKING_DIR: environments/dev
+
+jobs:
+  apply:
+    name: terraform apply
+    runs-on: ubuntu-latest
+    # Concurrency group ensures only one apply runs against this
+    # environment at a time. A second push to main while apply is
+    # mid-flight queues rather than racing.
+    concurrency:
+      group: terraform-apply-dev
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout merged main
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.16.4
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          aws-region:    ${{ vars.AWS_REGION }}
+          role-session-name: gha-terraform-apply-${{ github.run_id }}
+
+      - name: terraform init
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform init -lockfile=readonly
+
+      - name: terraform plan
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform plan -out=tfplan -no-color -input=false
+
+      - name: terraform apply
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform apply -no-color -input=false tfplan
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Terraform apply result" >> $GITHUB_STEP_SUMMARY
+          echo "Working directory: \`${{ env.WORKING_DIR }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Commit: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Status: **${{ job.status }}**" >> $GITHUB_STEP_SUMMARY
