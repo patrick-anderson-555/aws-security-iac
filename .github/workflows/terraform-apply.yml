@@ -17,7 +17,6 @@ on:
     paths:
       - 'environments/**'
       - 'modules/**'
-      - '.github/workflows/terraform-apply.yml'
 
 permissions:
   id-token: write      # required to request the OIDC token from GitHub
