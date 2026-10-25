@@ -121,14 +121,23 @@ jobs:
                 summary += '### Checkov findings\n\n_No findings._\n\n';
               } else {
                 summary += `### Checkov findings (${results.length})\n\n`;
+                summary += 'Checkov has found the following issues. These must be fixed or explicitly suppressed in `.checkov.yaml` before this PR can be merged to main.\n\n';
                 summary += '| Severity | Rule | Resource | Description |\n';
                 summary += '|----------|------|----------|-------------|\n';
                 for (const r of results.slice(0, 30)) {
                   const rule = ruleById[r.ruleId] || {};
                   const sev  = (rule.defaultConfiguration?.level) || (r.level) || 'warning';
                   const desc = (rule.shortDescription?.text) || (rule.name) || '';
-                  const loc  = r.locations?.[0]?.physicalLocation?.artifactLocation?.uri || '';
-                  const resource = (r.properties?.resource) || loc.split('/').pop() || '(unknown)';
+
+                  // Try multiple SARIF paths to find the resource address.
+                  const loc = r.locations?.[0] || {};
+                  const resource =
+                    (r.properties?.resource) ||
+                    (loc.logicalLocations?.[0]?.fullyQualifiedName) ||
+                    (loc.logicalLocations?.[0]?.name) ||
+                    (loc.physicalLocation?.artifactLocation?.uri) ||
+                    '(unknown)';
+
                   summary += `| ${sev} | \`${r.ruleId}\` | \`${resource}\` | ${desc} |\n`;
                 }
                 if (results.length > 30) {
