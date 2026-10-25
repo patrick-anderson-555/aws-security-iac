@@ -77,7 +77,7 @@ jobs:
           framework: terraform_plan
           output_format: cli,sarif
           output_file_path: console,checkov.sarif
-          soft_fail: true
+          soft_fail: false
           quiet: true
 
       - name: Upload Checkov SARIF to GitHub Security tab
@@ -87,25 +87,59 @@ jobs:
           sarif_file: checkov.sarif
           category: checkov
 
-      - name: Post plan summary on PR
+            - name: Post plan summary on PR
         if: always()
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
             const planPath = '${{ env.WORKING_DIR }}/tfplan.json';
+            const sarifPath = 'checkov.sarif';
+
             let summary = '## Terraform plan + Checkov\n\n';
+
+            // --- Plan summary ---
             if (fs.existsSync(planPath)) {
               const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
               const changes = (plan.resource_changes || []).reduce((acc, c) => {
                 for (const a of c.change.actions) acc[a] = (acc[a] || 0) + 1;
                 return acc;
               }, {});
-              summary += `**Resource actions:** ${JSON.stringify(changes)}\n\n`;
+              summary += `**Resource actions:** \`${JSON.stringify(changes)}\`\n\n`;
             } else {
               summary += '_terraform plan did not produce a JSON file; see job logs._\n\n';
             }
-            summary += 'Checkov findings uploaded to the **Security** tab under category `checkov`.';
+
+            // --- Checkov findings table ---
+            if (fs.existsSync(sarifPath)) {
+              const sarif = JSON.parse(fs.readFileSync(sarifPath, 'utf8'));
+              const results = (sarif.runs?.[0]?.results) || [];
+              const rules   = (sarif.runs?.[0]?.tool?.driver?.rules) || [];
+              const ruleById = Object.fromEntries(rules.map(r => [r.id, r]));
+
+              if (results.length === 0) {
+                summary += '### Checkov findings\n\n_No findings._\n\n';
+              } else {
+                summary += `### Checkov findings (${results.length})\n\n`;
+                summary += '| Severity | Rule | Resource | Description |\n';
+                summary += '|----------|------|----------|-------------|\n';
+                for (const r of results.slice(0, 30)) {
+                  const rule = ruleById[r.ruleId] || {};
+                  const sev  = (rule.defaultConfiguration?.level) || (r.level) || 'warning';
+                  const desc = (rule.shortDescription?.text) || (rule.name) || '';
+                  const loc  = r.locations?.[0]?.physicalLocation?.artifactLocation?.uri || '';
+                  const resource = (r.properties?.resource) || loc.split('/').pop() || '(unknown)';
+                  summary += `| ${sev} | \`${r.ruleId}\` | \`${resource}\` | ${desc} |\n`;
+                }
+                if (results.length > 30) {
+                  summary += `\n_Showing first 30 of ${results.length}. See the **Security** tab for the full list._\n`;
+                }
+                summary += '\n';
+              }
+            }
+
+            summary += 'Full findings also uploaded to the **Security** tab under category `checkov`.';
+
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
