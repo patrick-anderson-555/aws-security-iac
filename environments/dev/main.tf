@@ -186,3 +186,7 @@ data "aws_ami" "ubuntu" {
   }
   owners = ["099720109477"]
 }
+# PR #1 test — deliberately insecure bucket to trigger Checkov findings
+resource "aws_s3_bucket" "pr1_insecure" {
+  bucket = "checkov-practice-insecure-${data.aws_caller_identity.current.account_id}"
+}

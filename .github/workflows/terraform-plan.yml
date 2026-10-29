@@ -4,10 +4,6 @@
 #   1. terraform fmt/validate/plan output   (correctness and formatting)
 #   2. Checkov SARIF results                (security findings in the Security tab)
 #   3. PR comment summarising the above     (reviewer convenience)
-#
-# Hard-coded to plan against environments/dev/ for now. When staging/prod
-# environments exist, convert the `plan` job to a matrix strategy over
-# environments/*/ and discover changed directories dynamically.
 
 name: terraform-plan
 
@@ -69,15 +65,15 @@ jobs:
           terraform plan -out=tfplan -no-color -input=false
           terraform show -json tfplan > tfplan.json
 
-      - name: Run Checkov against the plan
+      - name: Run Checkov against HCL
         id: checkov
         uses: bridgecrewio/checkov-action@master
         with:
-          file: ${{ env.WORKING_DIR }}/tfplan.json
-          framework: terraform_plan
+          directory: ${{ env.WORKING_DIR }}
+          framework: terraform
           output_format: cli,sarif
           output_file_path: console,checkov.sarif
-          soft_fail: true
+          soft_fail: false
           quiet: true
 
       - name: Upload Checkov SARIF to GitHub Security tab
@@ -94,18 +90,58 @@ jobs:
           script: |
             const fs = require('fs');
             const planPath = '${{ env.WORKING_DIR }}/tfplan.json';
+            const sarifPath = 'checkov.sarif';
+
             let summary = '## Terraform plan + Checkov\n\n';
+
+            // --- Plan summary ---
             if (fs.existsSync(planPath)) {
               const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
               const changes = (plan.resource_changes || []).reduce((acc, c) => {
                 for (const a of c.change.actions) acc[a] = (acc[a] || 0) + 1;
                 return acc;
               }, {});
-              summary += `**Resource actions:** ${JSON.stringify(changes)}\n\n`;
+              summary += `**Resource actions:** \`${JSON.stringify(changes)}\`\n\n`;
             } else {
               summary += '_terraform plan did not produce a JSON file; see job logs._\n\n';
             }
-            summary += 'Checkov findings uploaded to the **Security** tab under category `checkov`.';
+
+            // --- Checkov findings table ---
+            if (fs.existsSync(sarifPath)) {
+              const sarif = JSON.parse(fs.readFileSync(sarifPath, 'utf8'));
+              const results = (sarif.runs?.[0]?.results) || [];
+              const rules   = (sarif.runs?.[0]?.tool?.driver?.rules) || [];
+              const ruleById = Object.fromEntries(rules.map(r => [r.id, r]));
+
+              if (results.length === 0) {
+                summary += '### Checkov findings\n\n_No findings._\n\n';
+              } else {
+                summary += `### Checkov findings (${results.length})\n\n`;
+                summary += 'Checkov has found the following issues. These must be fixed before this PR can be merged to main.\n\n';
+                summary += '| Rule | Location | Description |\n';
+                summary += '|------|----------|-------------|\n';
+                for (const r of results.slice(0, 30)) {
+                  const rule = ruleById[r.ruleId] || {};
+                  const desc = (rule.shortDescription?.text) || (rule.name) || '';
+
+                  // HCL scanning: physicalLocation gives file + line, which is
+                  // what reviewers want to click through to.
+                  const loc = r.locations?.[0] || {};
+                  const file = loc.physicalLocation?.artifactLocation?.uri || '(unknown)';
+                  const line = loc.physicalLocation?.region?.startLine;
+                  const location = line ? `${file}:${line}` : file;
+
+                  summary += `| \`${r.ruleId}\` | \`${location}\` | ${desc} |\n`;
+                }
+                if (results.length > 30) {
+                  summary += `\n_Showing first 30 of ${results.length}. See the **Security** tab for the full list._\n`;
+                }
+                summary += '\n';
+              }
+            }
+
+            summary += 'Full findings also uploaded to the **Security** tab under category `checkov`.';
+
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
