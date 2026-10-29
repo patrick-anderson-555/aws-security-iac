@@ -118,11 +118,10 @@ jobs:
               } else {
                 summary += `### Checkov findings (${results.length})\n\n`;
                 summary += 'Checkov has found the following issues. These must be fixed before this PR can be merged to main.\n\n';
-                summary += '| Severity | Rule | Location | Description |\n';
-                summary += '|----------|------|----------|-------------|\n';
+                summary += '| Rule | Location | Description |\n';
+                summary += '|------|----------|-------------|\n';
                 for (const r of results.slice(0, 30)) {
                   const rule = ruleById[r.ruleId] || {};
-                  const sev  = (rule.defaultConfiguration?.level) || (r.level) || 'warning';
                   const desc = (rule.shortDescription?.text) || (rule.name) || '';
 
                   // HCL scanning: physicalLocation gives file + line, which is
@@ -132,7 +131,7 @@ jobs:
                   const line = loc.physicalLocation?.region?.startLine;
                   const location = line ? `${file}:${line}` : file;
 
-                  summary += `| ${sev} | \`${r.ruleId}\` | \`${location}\` | ${desc} |\n`;
+                  summary += `| \`${r.ruleId}\` | \`${location}\` | ${desc} |\n`;
                 }
                 if (results.length > 30) {
                   summary += `\n_Showing first 30 of ${results.length}. See the **Security** tab for the full list._\n`;
