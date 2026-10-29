@@ -4,10 +4,6 @@
 #   1. terraform fmt/validate/plan output   (correctness and formatting)
 #   2. Checkov SARIF results                (security findings in the Security tab)
 #   3. PR comment summarising the above     (reviewer convenience)
-#
-# Hard-coded to plan against environments/dev/ for now. When staging/prod
-# environments exist, convert the `plan` job to a matrix strategy over
-# environments/*/ and discover changed directories dynamically.
 
 name: terraform-plan
 
@@ -69,12 +65,12 @@ jobs:
           terraform plan -out=tfplan -no-color -input=false
           terraform show -json tfplan > tfplan.json
 
-      - name: Run Checkov against the plan
+      - name: Run Checkov against HCL
         id: checkov
         uses: bridgecrewio/checkov-action@master
         with:
-          file: ${{ env.WORKING_DIR }}/tfplan.json
-          framework: terraform_plan
+          directory: ${{ env.WORKING_DIR }}
+          framework: terraform
           output_format: cli,sarif
           output_file_path: console,checkov.sarif
           soft_fail: false
@@ -121,24 +117,22 @@ jobs:
                 summary += '### Checkov findings\n\n_No findings._\n\n';
               } else {
                 summary += `### Checkov findings (${results.length})\n\n`;
-                summary += 'Checkov has found the following issues. These must be fixed or explicitly suppressed in `.checkov.yaml` before this PR can be merged to main.\n\n';
-                summary += '| Severity | Rule | Resource | Description |\n';
+                summary += 'Checkov has found the following issues. These must be fixed before this PR can be merged to main.\n\n';
+                summary += '| Severity | Rule | Location | Description |\n';
                 summary += '|----------|------|----------|-------------|\n';
                 for (const r of results.slice(0, 30)) {
                   const rule = ruleById[r.ruleId] || {};
                   const sev  = (rule.defaultConfiguration?.level) || (r.level) || 'warning';
                   const desc = (rule.shortDescription?.text) || (rule.name) || '';
 
-                  // Try multiple SARIF paths to find the resource address.
+                  // HCL scanning: physicalLocation gives file + line, which is
+                  // what reviewers want to click through to.
                   const loc = r.locations?.[0] || {};
-                  const resource =
-                    (r.properties?.resource) ||
-                    (loc.logicalLocations?.[0]?.fullyQualifiedName) ||
-                    (loc.logicalLocations?.[0]?.name) ||
-                    (loc.physicalLocation?.artifactLocation?.uri) ||
-                    '(unknown)';
+                  const file = loc.physicalLocation?.artifactLocation?.uri || '(unknown)';
+                  const line = loc.physicalLocation?.region?.startLine;
+                  const location = line ? `${file}:${line}` : file;
 
-                  summary += `| ${sev} | \`${r.ruleId}\` | \`${resource}\` | ${desc} |\n`;
+                  summary += `| ${sev} | \`${r.ruleId}\` | \`${location}\` | ${desc} |\n`;
                 }
                 if (results.length > 30) {
                   summary += `\n_Showing first 30 of ${results.length}. See the **Security** tab for the full list._\n`;
