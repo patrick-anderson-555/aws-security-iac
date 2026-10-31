@@ -89,8 +89,57 @@ jobs:
         with:
           script: |
             const fs = require('fs');
+            const path = require('path');
             const planPath = '${{ env.WORKING_DIR }}/tfplan.json';
             const sarifPath = 'checkov.sarif';
+
+            // Build a map of {file → [{startLine, endLine, address}]} by
+            // parsing each HCL file referenced by any finding. For each
+            // "resource <type> <name> {" declaration, we track the opening
+            // brace and count braces until we find the matching close.
+            // Strings and heredocs that happen to contain braces are a
+            // known edge case; good enough for typical Terraform.
+            function buildResourceMap(hclFiles) {
+              const map = {};
+              for (const file of hclFiles) {
+                if (!fs.existsSync(file)) continue;
+                const lines = fs.readFileSync(file, 'utf8').split('\n');
+                const resources = [];
+                let i = 0;
+                while (i < lines.length) {
+                  const m = lines[i].match(/^resource\s+"([^"]+)"\s+"([^"]+)"\s*\{/);
+                  if (m) {
+                    const address = `${m[1]}.${m[2]}`;
+                    const startLine = i + 1; // 1-indexed
+                    let depth = 1;
+                    let j = i;
+                    while (depth > 0 && j < lines.length - 1) {
+                      j++;
+                      for (const ch of lines[j]) {
+                        if (ch === '{') depth++;
+                        else if (ch === '}') depth--;
+                        if (depth === 0) break;
+                      }
+                    }
+                    const endLine = j + 1;
+                    resources.push({ startLine, endLine, address });
+                    i = j + 1;
+                  } else {
+                    i++;
+                  }
+                }
+                map[file] = resources;
+              }
+              return map;
+            }
+
+            function lookupAddress(resourceMap, file, line) {
+              const resources = resourceMap[file] || [];
+              for (const r of resources) {
+                if (line >= r.startLine && line <= r.endLine) return r.address;
+              }
+              return '(unknown)';
+            }
 
             let summary = '## Terraform plan + Checkov\n\n';
 
@@ -113,25 +162,32 @@ jobs:
               const rules   = (sarif.runs?.[0]?.tool?.driver?.rules) || [];
               const ruleById = Object.fromEntries(rules.map(r => [r.id, r]));
 
+              // Collect every HCL file referenced by any finding so we only
+              // parse what we actually need.
+              const hclFiles = [...new Set(
+                results
+                  .map(r => r.locations?.[0]?.physicalLocation?.artifactLocation?.uri)
+                  .filter(Boolean)
+              )];
+              const resourceMap = buildResourceMap(hclFiles);
+
               if (results.length === 0) {
                 summary += '### Checkov findings\n\n_No findings._\n\n';
               } else {
                 summary += `### Checkov findings (${results.length})\n\n`;
                 summary += 'Checkov has found the following issues. These must be fixed before this PR can be merged to main.\n\n';
-                summary += '| Rule | Location | Description |\n';
-                summary += '|------|----------|-------------|\n';
+                summary += '| Rule | Resource | Line | Description |\n';
+                summary += '|------|----------|------|-------------|\n';
                 for (const r of results.slice(0, 30)) {
                   const rule = ruleById[r.ruleId] || {};
                   const desc = (rule.shortDescription?.text) || (rule.name) || '';
 
-                  // HCL scanning: physicalLocation gives file + line, which is
-                  // what reviewers want to click through to.
                   const loc = r.locations?.[0] || {};
-                  const file = loc.physicalLocation?.artifactLocation?.uri || '(unknown)';
-                  const line = loc.physicalLocation?.region?.startLine;
-                  const location = line ? `${file}:${line}` : file;
+                  const file = loc.physicalLocation?.artifactLocation?.uri || '';
+                  const line = loc.physicalLocation?.region?.startLine || 0;
+                  const address = file && line ? lookupAddress(resourceMap, file, line) : '(unknown)';
 
-                  summary += `| \`${r.ruleId}\` | \`${location}\` | ${desc} |\n`;
+                  summary += `| \`${r.ruleId}\` | \`${address}\` | ${line || '-'} | ${desc} |\n`;
                 }
                 if (results.length > 30) {
                   summary += `\n_Showing first 30 of ${results.length}. See the **Security** tab for the full list._\n`;
