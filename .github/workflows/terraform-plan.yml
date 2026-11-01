@@ -70,6 +70,7 @@ jobs:
         uses: bridgecrewio/checkov-action@master
         with:
           directory: ${{ env.WORKING_DIR }}
+          config_file: .checkov.yaml
           framework: terraform
           output_format: cli,sarif
           output_file_path: console,checkov.sarif
