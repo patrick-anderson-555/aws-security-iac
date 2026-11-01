@@ -76,6 +76,18 @@ jobs:
           soft_fail: false
           quiet: true
 
+      - name: DIAGNOSTIC — dump a skipped SARIF result
+        if: always() && hashFiles('checkov.sarif') != ''
+        run: |
+          echo "=== All distinct result levels present ==="
+          jq '[.runs[0].results[].level] | unique' checkov.sarif
+          echo ""
+          echo "=== First result with level != error (likely a suppressed one) ==="
+          jq '[.runs[0].results[] | select(.level != "error")][0]' checkov.sarif
+          echo ""
+          echo "=== First result with level == error (for comparison) ==="
+          jq '[.runs[0].results[] | select(.level == "error")][0]' checkov.sarif
+          
       - name: Upload Checkov SARIF to GitHub Security tab
         if: always() && hashFiles('checkov.sarif') != ''
         uses: github/codeql-action/upload-sarif@v3
