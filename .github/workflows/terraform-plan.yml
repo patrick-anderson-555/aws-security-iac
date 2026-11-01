@@ -4,6 +4,17 @@
 #   1. terraform fmt/validate/plan output   (correctness and formatting)
 #   2. Checkov SARIF results                (security findings in the Security tab)
 #   3. PR comment summarising the above     (reviewer convenience)
+#
+# Checkov scans HCL (framework: terraform) rather than plan JSON. The
+# trade-off: HCL scanning may miss issues that depend on variable
+# resolution or module expansion, but it enables per-resource inline
+# suppressions via "# checkov:skip=<rule>:<reason>" comments. Inline
+# skips must be placed BEFORE the first argument inside the resource
+# block (observed requirement with Checkov 3.4.0).
+#
+# Hard-coded to plan against environments/dev/ for now. When staging/prod
+# environments exist, convert the `plan` job to a matrix strategy over
+# environments/*/ and discover changed directories dynamically.
 
 name: terraform-plan
 
@@ -76,18 +87,6 @@ jobs:
           soft_fail: false
           quiet: true
 
-      - name: DIAGNOSTIC — dump a skipped SARIF result
-        if: always() && hashFiles('checkov.sarif') != ''
-        run: |
-          echo "=== All distinct result levels present ==="
-          jq '[.runs[0].results[].level] | unique' checkov.sarif
-          echo ""
-          echo "=== First result with level != error (likely a suppressed one) ==="
-          jq '[.runs[0].results[] | select(.level != "error")][0]' checkov.sarif
-          echo ""
-          echo "=== First result with level == error (for comparison) ==="
-          jq '[.runs[0].results[] | select(.level == "error")][0]' checkov.sarif
-          
       - name: Upload Checkov SARIF to GitHub Security tab
         if: always() && hashFiles('checkov.sarif') != ''
         uses: github/codeql-action/upload-sarif@v3
@@ -101,16 +100,13 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const path = require('path');
             const planPath = '${{ env.WORKING_DIR }}/tfplan.json';
             const sarifPath = 'checkov.sarif';
 
-            // Build a map of {file → [{startLine, endLine, address}]} by
-            // parsing each HCL file referenced by any finding. For each
-            // "resource <type> <name> {" declaration, we track the opening
-            // brace and count braces until we find the matching close.
-            // Strings and heredocs that happen to contain braces are a
-            // known edge case; good enough for typical Terraform.
+            // Parse HCL files to map line numbers to Terraform resource
+            // addresses, so findings show "aws_s3_bucket.data" rather than
+            // just a file and line. Brace-counting; strings/heredocs with
+            // literal braces are a known edge case.
             function buildResourceMap(hclFiles) {
               const map = {};
               for (const file of hclFiles) {
@@ -122,7 +118,7 @@ jobs:
                   const m = lines[i].match(/^resource\s+"([^"]+)"\s+"([^"]+)"\s*\{/);
                   if (m) {
                     const address = `${m[1]}.${m[2]}`;
-                    const startLine = i + 1; // 1-indexed
+                    const startLine = i + 1;
                     let depth = 1;
                     let j = i;
                     while (depth > 0 && j < lines.length - 1) {
@@ -133,8 +129,7 @@ jobs:
                         if (depth === 0) break;
                       }
                     }
-                    const endLine = j + 1;
-                    resources.push({ startLine, endLine, address });
+                    resources.push({ startLine, endLine: j + 1, address });
                     i = j + 1;
                   } else {
                     i++;
@@ -167,42 +162,70 @@ jobs:
               summary += '_terraform plan did not produce a JSON file; see job logs._\n\n';
             }
 
-            // --- Checkov findings table ---
+            // --- Checkov findings ---
             if (fs.existsSync(sarifPath)) {
               const sarif = JSON.parse(fs.readFileSync(sarifPath, 'utf8'));
-              const results = (sarif.runs?.[0]?.results) || [];
-              const rules   = (sarif.runs?.[0]?.tool?.driver?.rules) || [];
-              const ruleById = Object.fromEntries(rules.map(r => [r.id, r]));
+              const allResults = (sarif.runs?.[0]?.results) || [];
+              const rules      = (sarif.runs?.[0]?.tool?.driver?.rules) || [];
+              const ruleById   = Object.fromEntries(rules.map(r => [r.id, r]));
 
-              // Collect every HCL file referenced by any finding so we only
-              // parse what we actually need.
+              // A finding is suppressed if it carries a non-empty
+              // suppressions array (Checkov marks inline skips this way,
+              // also dropping the level from "error" to "warning").
+              const isSuppressed = (r) => Array.isArray(r.suppressions) && r.suppressions.length > 0;
+              const active     = allResults.filter(r => !isSuppressed(r));
+              const suppressed = allResults.filter(r =>  isSuppressed(r));
+
+              // Parse only the HCL files referenced by any finding.
               const hclFiles = [...new Set(
-                results
+                allResults
                   .map(r => r.locations?.[0]?.physicalLocation?.artifactLocation?.uri)
                   .filter(Boolean)
               )];
               const resourceMap = buildResourceMap(hclFiles);
 
-              if (results.length === 0) {
-                summary += '### Checkov findings\n\n_No findings._\n\n';
+              const addressOf = (r) => {
+                const loc  = r.locations?.[0] || {};
+                const file = loc.physicalLocation?.artifactLocation?.uri || '';
+                const line = loc.physicalLocation?.region?.startLine || 0;
+                return (file && line) ? lookupAddress(resourceMap, file, line) : '(unknown)';
+              };
+              const lineOf = (r) =>
+                r.locations?.[0]?.physicalLocation?.region?.startLine || '-';
+              const descOf = (r) => {
+                const rule = ruleById[r.ruleId] || {};
+                return (rule.shortDescription?.text) || (rule.name) || (r.message?.text) || '';
+              };
+
+              // --- Active (merge-blocking) findings ---
+              if (active.length === 0) {
+                summary += '### Checkov findings\n\n_No active findings._\n\n';
               } else {
-                summary += `### Checkov findings (${results.length})\n\n`;
+                summary += `### Checkov findings (${active.length})\n\n`;
                 summary += 'Checkov has found the following issues. These must be fixed before this PR can be merged to main.\n\n';
                 summary += '| Rule | Resource | Line | Description |\n';
                 summary += '|------|----------|------|-------------|\n';
-                for (const r of results.slice(0, 30)) {
-                  const rule = ruleById[r.ruleId] || {};
-                  const desc = (rule.shortDescription?.text) || (rule.name) || '';
-
-                  const loc = r.locations?.[0] || {};
-                  const file = loc.physicalLocation?.artifactLocation?.uri || '';
-                  const line = loc.physicalLocation?.region?.startLine || 0;
-                  const address = file && line ? lookupAddress(resourceMap, file, line) : '(unknown)';
-
-                  summary += `| \`${r.ruleId}\` | \`${address}\` | ${line || '-'} | ${desc} |\n`;
+                for (const r of active.slice(0, 30)) {
+                  summary += `| \`${r.ruleId}\` | \`${addressOf(r)}\` | ${lineOf(r)} | ${descOf(r)} |\n`;
                 }
-                if (results.length > 30) {
-                  summary += `\n_Showing first 30 of ${results.length}. See the **Security** tab for the full list._\n`;
+                if (active.length > 30) {
+                  summary += `\n_Showing first 30 of ${active.length}. See the **Security** tab for the full list._\n`;
+                }
+                summary += '\n';
+              }
+
+              // --- Suppressed findings (audit trail) ---
+              if (suppressed.length > 0) {
+                summary += `### Suppressed findings (${suppressed.length})\n\n`;
+                summary += 'These checks were skipped by inline `# checkov:skip` comments and do **not** block merge. Listed here for review.\n\n';
+                summary += '| Rule | Resource | Line | Justification |\n';
+                summary += '|------|----------|------|---------------|\n';
+                for (const r of suppressed.slice(0, 30)) {
+                  const just = (r.suppressions?.[0]?.justification) || '(no reason given)';
+                  summary += `| \`${r.ruleId}\` | \`${addressOf(r)}\` | ${lineOf(r)} | ${just} |\n`;
+                }
+                if (suppressed.length > 30) {
+                  summary += `\n_Showing first 30 of ${suppressed.length}._\n`;
                 }
                 summary += '\n';
               }

@@ -88,10 +88,10 @@ resource "aws_security_group" "web" {
 }
 
 resource "aws_s3_bucket" "data" {
-  # checkov:skip=CKV_AWS_18:Access logging...
-  # checkov:skip=CKV_AWS_144:Cross-region replication...
-  # checkov:skip=CKV2_AWS_61:No lifecycle rule...
-  # checkov:skip=CKV2_AWS_62:Event notifications...
+  # checkov:skip=CKV_AWS_18:Access logging is not required as this is a test
+  # checkov:skip=CKV_AWS_144:Cross-region replication is not required as this is a test
+  # checkov:skip=CKV2_AWS_61:No lifecycle rule is not applicable for this is a test
+  # checkov:skip=CKV2_AWS_62:Event notifications is not applicable for this is a test
   bucket = "checkov-practice-${data.aws_caller_identity.current.account_id}"
 }
 
