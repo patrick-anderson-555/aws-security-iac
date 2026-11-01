@@ -87,13 +87,10 @@ resource "aws_security_group" "web" {
   }
 }
 
-# --- S3 bucket and its sidecar protections ---
 resource "aws_s3_bucket" "data" {
+  # checkov:skip=CKV_AWS_18:Access logging is not required for this test resource but may be needed in my next security projects
+  # checkov:skip=CKV2_AWS_62:Event notifications is not required for this test resource but may be needed in my next security projects
   bucket = "checkov-practice-${data.aws_caller_identity.current.account_id}"
-  # checkov:skip=CKV_AWS_18:Access logging would be centralized in a shared logging account; out of scope for this practice project
-  # checkov:skip=CKV_AWS_144:Cross-region replication not needed; this bucket's data is not critical enough to justify the cost
-  # checkov:skip=CKV2_AWS_61:No lifecycle rule needed; this bucket holds reference data retained indefinitely
-  # checkov:skip=CKV2_AWS_62:Event notifications not needed; this is a static-data bucket with no event consumers
 }
 
 resource "aws_s3_bucket_public_access_block" "data" {
@@ -185,4 +182,8 @@ data "aws_ami" "ubuntu" {
     values = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"]
   }
   owners = ["099720109477"]
+}
+# PR #1 test — deliberately insecure bucket to trigger Checkov findings
+resource "aws_s3_bucket" "pr1_insecure" {
+  bucket = "checkov-practice-insecure-${data.aws_caller_identity.current.account_id}"
 }
