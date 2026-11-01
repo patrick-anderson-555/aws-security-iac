@@ -1,20 +1,9 @@
 # Layer 2 of the IaC security gate.
 #
-# Runs on every PR touching Terraform code. Produces three artifacts:
+# Runs on every PR touching Terraform code. Produces:
 #   1. terraform fmt/validate/plan output   (correctness and formatting)
 #   2. Checkov SARIF results                (security findings in the Security tab)
-#   3. PR comment summarising the above     (reviewer convenience)
-#
-# Checkov scans HCL (framework: terraform) rather than plan JSON. The
-# trade-off: HCL scanning may miss issues that depend on variable
-# resolution or module expansion, but it enables per-resource inline
-# suppressions via "# checkov:skip=<rule>:<reason>" comments. Inline
-# skips must be placed BEFORE the first argument inside the resource
-# block (observed requirement with Checkov 3.4.0).
-#
-# Hard-coded to plan against environments/dev/ for now. When staging/prod
-# environments exist, convert the `plan` job to a matrix strategy over
-# environments/*/ and discover changed directories dynamically.
+#   3. PR comment summarising findings       (reviewer convenience)
 
 name: terraform-plan
 
@@ -100,13 +89,11 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const planPath = '${{ env.WORKING_DIR }}/tfplan.json';
             const sarifPath = 'checkov.sarif';
 
             // Parse HCL files to map line numbers to Terraform resource
-            // addresses, so findings show "aws_s3_bucket.data" rather than
-            // just a file and line. Brace-counting; strings/heredocs with
-            // literal braces are a known edge case.
+            // addresses. Brace-counting; strings/heredocs with literal
+            // braces are a known edge case.
             function buildResourceMap(hclFiles) {
               const map = {};
               for (const file of hclFiles) {
@@ -150,18 +137,6 @@ jobs:
 
             let summary = '## Terraform plan + Checkov\n\n';
 
-            // --- Plan summary ---
-            if (fs.existsSync(planPath)) {
-              const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
-              const changes = (plan.resource_changes || []).reduce((acc, c) => {
-                for (const a of c.change.actions) acc[a] = (acc[a] || 0) + 1;
-                return acc;
-              }, {});
-              summary += `**Resource actions:** \`${JSON.stringify(changes)}\`\n\n`;
-            } else {
-              summary += '_terraform plan did not produce a JSON file; see job logs._\n\n';
-            }
-
             // --- Checkov findings ---
             if (fs.existsSync(sarifPath)) {
               const sarif = JSON.parse(fs.readFileSync(sarifPath, 'utf8'));
@@ -169,14 +144,10 @@ jobs:
               const rules      = (sarif.runs?.[0]?.tool?.driver?.rules) || [];
               const ruleById   = Object.fromEntries(rules.map(r => [r.id, r]));
 
-              // A finding is suppressed if it carries a non-empty
-              // suppressions array (Checkov marks inline skips this way,
-              // also dropping the level from "error" to "warning").
               const isSuppressed = (r) => Array.isArray(r.suppressions) && r.suppressions.length > 0;
               const active     = allResults.filter(r => !isSuppressed(r));
               const suppressed = allResults.filter(r =>  isSuppressed(r));
 
-              // Parse only the HCL files referenced by any finding.
               const hclFiles = [...new Set(
                 allResults
                   .map(r => r.locations?.[0]?.physicalLocation?.artifactLocation?.uri)
@@ -197,7 +168,6 @@ jobs:
                 return (rule.shortDescription?.text) || (rule.name) || (r.message?.text) || '';
               };
 
-              // --- Active (merge-blocking) findings ---
               if (active.length === 0) {
                 summary += '### Checkov findings\n\n_No active findings._\n\n';
               } else {
@@ -214,10 +184,9 @@ jobs:
                 summary += '\n';
               }
 
-              // --- Suppressed findings (audit trail) ---
               if (suppressed.length > 0) {
                 summary += `### Suppressed findings (${suppressed.length})\n\n`;
-                summary += 'These checks were skipped by inline `# checkov:skip` comments and do **not** block merge. Listed here for review.\n\n';
+                summary += 'These checks were skipped by inline `# checkov:skip` comments and do **not** block merge. Inline suppressions are audited by the security team on a regular basis.\n\n';
                 summary += '| Rule | Resource | Line | Justification |\n';
                 summary += '|------|----------|------|---------------|\n';
                 for (const r of suppressed.slice(0, 30)) {
