@@ -1,0 +1,22 @@
+# CODEOWNERS — review requirements for security-critical paths.
+#
+# GitHub auto-requests review from the owner when a PR touches a matching
+# path, and (with "Require review from Code Owners" enabled in the branch
+# ruleset) blocks merge until that owner approves.
+#
+# In this solo project the owner is the repo owner. The point is to
+# demonstrate separation-of-duties: in a team, these paths would be owned
+# by a security team distinct from the engineers writing Terraform, so
+# suppression and policy changes get an independent reviewer.
+#
+# NOTE: the "Require review from Code Owners" ruleset toggle is left OFF
+# here. GitHub forbids self-approval, so with a single owner it would make
+# these files unmergeable. It would be switched on once a second reviewer
+# exists, turning these requests into hard merge blocks.
+#
+#   - .checkov.yaml          system-wide Checkov suppressions (security policy)
+#   - bootstrap/github_oidc.tf  OIDC trust + IAM roles that gate AWS access
+#   - .github/CODEOWNERS      this file itself
+.checkov.yaml                   @patrick-anderson-555
+bootstrap/github_oidc.tf        @patrick-anderson-555
+.github/CODEOWNERS              @patrick-anderson-555

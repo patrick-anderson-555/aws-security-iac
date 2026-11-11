@@ -1,0 +1,13 @@
+# System-wide Checkov suppressions.
+#
+# These are project-wide policy exceptions that apply to every resource,
+# not per-resource exceptions. Changing this file requires security
+# review (see .github/CODEOWNERS), because it alters the security policy
+# the whole gate enforces.
+#
+# Per-resource exceptions use inline "# checkov:skip" comments instead,
+# which are flagged on every merge by the suppression-audit workflow.
+
+skip-check:
+  - CKV_AWS_144   # Cross-region replication not needed for my security projects
+  - CKV2_AWS_61   # Lifecycle rules not needed for my security projects
