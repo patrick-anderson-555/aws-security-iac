@@ -1,0 +1,190 @@
+# Suppression audit (part of the IaC security gate).
+#
+# Runs on every merge to main that touches Terraform. Inventories every
+# inline "# checkov:skip" suppression currently on main, diffs against
+# the previous commit to find newly-introduced ones (uniqueness is
+# rule + resource address), writes the full list to the run summary, and
+# keeps a single tracking Issue ("Active Checkov suppressions") up to
+# date. When a merge adds new suppressions, it also comments on that
+# Issue so watchers are notified.
+
+name: suppression-audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/*.tf'
+
+permissions:
+  contents: read   # read the repo history to diff suppressions
+  issues: write    # create/update the tracking Issue and comment on it
+
+jobs:
+  audit:
+    name: audit inline suppressions
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout main with previous commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2   # need HEAD and HEAD~1 to diff suppressions
+
+      - name: Inventory and diff suppressions, update tracking Issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { execSync } = require('child_process');
+
+            const ISSUE_TITLE = 'Active Checkov suppressions';
+            const SKIP_RE = /checkov:skip=([A-Za-z0-9_]+)(?::(.*))?/;
+
+            // Given the full text of one .tf file, find every resource
+            // block and the line range it spans. Brace-counting; strings
+            // or heredocs containing literal braces are a known edge case.
+            // Returns [{startLine, endLine, address}] (1-indexed lines).
+            function resourceBlocks(lines) {
+              const blocks = [];
+              let i = 0;
+              while (i < lines.length) {
+                const m = lines[i].match(/^resource\s+"([^"]+)"\s+"([^"]+)"\s*\{/);
+                if (m) {
+                  const address = `${m[1]}.${m[2]}`;
+                  const startLine = i + 1;
+                  let depth = 1;
+                  let j = i;
+                  while (depth > 0 && j < lines.length - 1) {
+                    j++;
+                    for (const ch of lines[j]) {
+                      if (ch === '{') depth++;
+                      else if (ch === '}') depth--;
+                      if (depth === 0) break;
+                    }
+                  }
+                  blocks.push({ startLine, endLine: j + 1, address });
+                  i = j + 1;
+                } else {
+                  i++;
+                }
+              }
+              return blocks;
+            }
+
+            // Which resource block contains a given line? Inline skips sit
+            // inside the resource block, so the containing block's address
+            // is the resource the suppression applies to.
+            function addressForLine(blocks, line) {
+              for (const b of blocks) {
+                if (line >= b.startLine && line <= b.endLine) return b.address;
+              }
+              return '(unknown)';
+            }
+
+            // List every inline suppression present at a given git ref.
+            // Returns [{file, line, rule, resource, justification, key}].
+            function suppressionsAtRef(ref) {
+              let files;
+              try {
+                files = execSync(`git ls-tree -r --name-only ${ref}`, { encoding: 'utf8' })
+                  .split('\n')
+                  .filter(f => f.endsWith('.tf'));
+              } catch (e) {
+                return [];
+              }
+
+              const out = [];
+              for (const file of files) {
+                let content;
+                try {
+                  content = execSync(`git show ${ref}:${file}`, { encoding: 'utf8' });
+                } catch (e) {
+                  continue;
+                }
+                const lines = content.split('\n');
+                const blocks = resourceBlocks(lines);
+                for (let i = 0; i < lines.length; i++) {
+                  const m = lines[i].match(SKIP_RE);
+                  if (m) {
+                    const rule = m[1];
+                    const justification = (m[2] || '').trim() || '(no reason given)';
+                    const resource = addressForLine(blocks, i + 1);
+                    out.push({
+                      file,
+                      line: i + 1,
+                      rule,
+                      resource,
+                      justification,
+                      key: `${rule}@@${resource}`, // uniqueness: rule + resource
+                    });
+                  }
+                }
+              }
+              return out;
+            }
+
+            const current  = suppressionsAtRef('HEAD');
+            const previous = suppressionsAtRef('HEAD~1');
+
+            const prevKeys = new Set(previous.map(s => s.key));
+            const added = current.filter(s => !prevKeys.has(s.key));
+
+            function table(rows) {
+              if (rows.length === 0) return '_None._\n';
+              let t = '| Rule | Resource | File | Line | Justification |\n';
+              t += '|------|----------|------|------|---------------|\n';
+              for (const s of rows) {
+                t += `| \`${s.rule}\` | \`${s.resource}\` | \`${s.file}\` | ${s.line} | ${s.justification} |\n`;
+              }
+              return t;
+            }
+
+            const now = new Date().toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+            let body = `# Active Checkov suppressions\n\n`;
+            body += `_Auto-generated by the suppression-audit workflow. Last updated: ${now} (commit \`${context.sha.slice(0,7)}\`)._\n\n`;
+            body += `There are currently **${current.length}** inline \`checkov:skip\` suppressions on \`main\`.\n\n`;
+            body += table(current);
+            body += `\nThese suppressions are reviewed by the security team on a regular basis.\n`;
+
+            require('fs').appendFileSync(process.env.GITHUB_STEP_SUMMARY, body);
+
+            // --- Find or create the tracking Issue ---
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'suppression-audit',
+              per_page: 100,
+            });
+            let issue = existing.data.find(i => i.title === ISSUE_TITLE);
+
+            if (!issue) {
+              const created = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: ISSUE_TITLE,
+                body,
+                labels: ['suppression-audit'],
+              });
+              issue = created.data;
+            } else {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body,
+              });
+            }
+
+            // --- If this merge added suppressions, comment to notify ---
+            if (added.length > 0) {
+              let note = `### ⚠️ New suppression(s) introduced by commit \`${context.sha.slice(0,7)}\`\n\n`;
+              note += `The following inline suppressions are new on \`main\` as of this merge and should be reviewed:\n\n`;
+              note += table(added);
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: note,
+              });
+            }
